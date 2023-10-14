@@ -20,8 +20,10 @@ from PIL import Image
 
 from requests import exceptions
 
-from weconnect import weconnect, addressable, errors, util, domain
-from weconnect.__version import __version__ as __weconnect_version__
+from weconnect_cupra import weconnect_cupra, addressable, errors, util
+from weconnect_cupra.service import Service
+
+from weconnect_cupra.__version import __version__ as __weconnect_version__
 
 from .__version import __version__
 
@@ -96,8 +98,6 @@ def main():  # noqa: C901  # pylint: disable=too-many-branches,too-many-statemen
     weConnectGroup = parser.add_argument_group('WeConnect')
     weConnectGroup.add_argument('-u', '--username', type=str, help='Username of Volkswagen id', required=False)
     weConnectGroup.add_argument('-p', '--password', type=str, help='Password of Volkswagen id', required=False)
-    weConnectGroup.add_argument('--spin', help='S-PIN of Volkswagen id, required for selected commands', required=False, nargs='?', action='store',
-                                default=None, const=True)
     defaultNetRc = os.path.join(os.path.expanduser("~"), ".netrc")
     weConnectGroup.add_argument('--netrc', help=f'File in netrc syntax providing login (default: {defaultNetRc}).'
                                 ' Netrc is only used when username and password are not provided  as arguments', default=None, required=False)
@@ -111,8 +111,6 @@ def main():  # noqa: C901  # pylint: disable=too-many-branches,too-many-statemen
     weConnectGroup.add_argument('--chargingLocationRadius', type=NumberRangeArgument(0, 100000),
                                 help='Radius in meters around the chargingLocation to search for chargers')
     weConnectGroup.add_argument('--no-capabilities', dest='noCapabilities', help='Do not add capabilities', action='store_true')
-    weConnectGroup.add_argument('--selective', help='Just fetch status of a certain type', default=None, required=False, action='append',
-                                type=domain.Domain, choices=list(domain.Domain))
     weConnectGroup.add_argument('--convert-times', dest='convertTimes',
                                 help='Convert all times from UTC to timezone, e.g. --convert-times \'Europe/Berlin\', leave empty to use system timezone',
                                 nargs='?', const='', default=None, type=str)
@@ -205,31 +203,22 @@ def main():  # noqa: C901  # pylint: disable=too-many-branches,too-many-statemen
             username = args.username
             password = getpass.getpass()
 
-    if args.spin is not None:
-        spin = args.spin
+    if args.netrc is not None:
+        netRcFilename = args.netrc
     else:
-        if args.netrc is not None:
-            netRcFilename = args.netrc
-        else:
-            netRcFilename = defaultNetRc
-        try:
-            secrets = netrc.netrc(file=args.netrc)
-            _, account, _ = secrets.authenticators("volkswagen.de")
-            if account is not None:
-                spin = account
-        except netrc.NetrcParseError as err:
-            LOG.error('Authentification using .netrc failed: %s', err)
-            sys.exit(1)
-        except TypeError:
-            pass
-        except FileNotFoundError:
-            pass
-    if spin is not None and not isinstance(spin, bool):
-        if len(spin) == 0:
-            spin = None
-        elif not re.match(r"^\d{4}$", spin):
-            LOG.error('S-PIN: %s needs to be a four digit number', spin)
-            sys.exit(1)
+        netRcFilename = defaultNetRc
+    try:
+        secrets = netrc.netrc(file=args.netrc)
+        _, account, _ = secrets.authenticators("volkswagen.de")
+        if account is not None:
+            spin = account
+    except netrc.NetrcParseError as err:
+        LOG.error('Authentification using .netrc failed: %s', err)
+        sys.exit(1)
+    except TypeError:
+        pass
+    except FileNotFoundError:
+        pass
 
     mqttusername = None
     mqttpassword = None
@@ -271,7 +260,7 @@ def main():  # noqa: C901  # pylint: disable=too-many-branches,too-many-statemen
 
     mqttCLient = WeConnectMQTTClient(clientId=args.mqttclientid, protocol=mqttVersion, transport=args.transport, interval=args.interval,
                                      prefix=args.prefix, ignore=args.ignore, updateCapabilities=(not args.noCapabilities),
-                                     updatePictures=args.pictures, selective=args.selective, listNewTopics=args.listTopics,
+                                     updatePictures=args.pictures, selective=False, listNewTopics=args.listTopics,
                                      republishOnUpdate=args.republishOnUpdate, pictureFormat=args.pictureFormat, topicFilterRegex=topicFilterRegex,
                                      convertTimezone=convertTimezone, timeFormat=args.timeFormat, withRawJsonTopic=args.withRawJsonTopic)
     mqttCLient.enable_logger()
@@ -305,11 +294,16 @@ def main():  # noqa: C901  # pylint: disable=too-many-branches,too-many-statemen
     try:
         while True:
             try:
-                weConnect = weconnect.WeConnect(username=username, password=password, spin=spin, updateAfterLogin=False,
+                weConnect = weconnect_cupra.WeConnect(username=username, password=password,
+                                                      service=Service.MY_CUPRA,
+                                                      updateAfterLogin=False,
+                                                      loginOnInit=False,
+                                                      timeout=10,
                                                 updateCapabilities=mqttCLient.updateCapabilities, updatePictures=mqttCLient.updatePictures,
-                                                maxAgePictures=args.pictureCache, selective=mqttCLient.selective,
-                                                forceReloginAfter=21600, timeout=180)
+                                                maxAgePictures=args.pictureCache, selective=mqttCLient.selective)
+                weConnect.login()
                 mqttCLient.connectWeConnect(weConnect)
+                weConnect.update()
                 break
             except exceptions.ConnectionError as e:
                 LOG.error('Could not connect to VW-Server: %s, will retry in 10 seconds', e)
@@ -325,7 +319,6 @@ def main():  # noqa: C901  # pylint: disable=too-many-branches,too-many-statemen
                 sys.exit(1)
             mqttCLient.weConnect.latitude = latitude
             mqttCLient.weConnect.longitude = longitude
-        mqttCLient.weConnect.searchRadius = args.chargingLocationRadius
 
         while True:
             try:
